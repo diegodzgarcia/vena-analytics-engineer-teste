@@ -5,10 +5,11 @@ de preços de concorrentes e banco transacional SQLite) em um dataset
 analítico no BigQuery, para alimentar um dashboard diário de "saúde
 comercial".
 
-> Status: **esqueleto do projeto** — estrutura, configuração e contratos
-> definidos. A lógica de cada etapa (ingestão, modelagem dbt, orquestração
-> Dagster) é implementada nos commits seguintes. Ver `docs/architecture.md`
-> para o diagrama de fluxo e as decisões de arquitetura.
+> Status: ingestão do SQLite implementada (clientes, produtos, itens_pedido
+> em chunks -> Parquet no GCS -> raw no BigQuery). Ingestão da API, do
+> scraping, modelagem dbt e orquestração Dagster seguem nos próximos
+> commits. Ver `docs/architecture.md` para o diagrama de fluxo e as decisões
+> de arquitetura.
 
 ## Estrutura do repositório
 
@@ -16,13 +17,16 @@ comercial".
 .
 ├── docs/
 │   └── architecture.md        # diagrama do fluxo + decisões de arquitetura
+├── scripts/
+│   └── ingest_sqlite.py        # orquestra a ingestão do SQLite (standalone por enquanto)
 ├── src/vena_pipeline/
 │   ├── config.py               # configuração central (lê .env)
 │   ├── ingestion/               # extração de cada fonte (raw)
-│   │   ├── api_vendas.py
-│   │   ├── scraping_concorrentes.py
-│   │   └── sqlite_extract.py
-│   ├── dagster_defs/            # orquestração
+│   │   ├── sqlite_extract.py    # ✅ implementado — extração em chunks
+│   │   ├── loaders.py           # ✅ implementado — Parquet no GCS + load BigQuery raw
+│   │   ├── api_vendas.py        # próxima etapa
+│   │   └── scraping_concorrentes.py  # próxima etapa
+│   ├── dagster_defs/            # orquestração (próxima etapa)
 │   │   ├── assets.py
 │   │   ├── resources.py
 │   │   ├── asset_checks.py
@@ -54,18 +58,36 @@ no `.env` para o caminho local do arquivo.
 ## Rodando o pipeline
 
 ```bash
-# Dagster UI
+# Ingestão do SQLite (clientes, produtos, itens_pedido) — standalone por
+# enquanto, vira asset do Dagster na etapa de orquestração
+python scripts/ingest_sqlite.py
+
+# Dagster UI (ainda sem assets registrados)
 dagster dev -f src/vena_pipeline/dagster_defs/definitions.py
 
-# dbt (staging + mart)
+# dbt (staging + mart) — próxima etapa
 cd dbt/vena_pipeline && dbt build
 
 # Testes unitários
 pytest
 ```
 
-*(comandos ficam completos conforme as etapas de ingestão/orquestração são
-implementadas — no momento os assets do Dagster ainda não existem.)*
+### Ingestão do SQLite — decisões desta etapa
+
+- **Sem `LIMIT/OFFSET`:** o generator de `itens_pedido` usa um único cursor
+  `sqlite3` com `fetchmany`, mantendo a posição entre chamadas. Paginação via
+  `OFFSET` re-varre a tabela do zero a cada página — O(n²) em 5M linhas seria
+  proibitivo.
+- **Raw fiel à fonte:** nenhuma limpeza/tipagem acontece na extração
+  (`preco_tabela` continua texto, `data_item` continua string). Isso é
+  responsabilidade da camada staging (dbt, próxima etapa).
+- **Idempotência via `WRITE_TRUNCATE`:** como o SQLite é um dump completo
+  (sem coluna de watermark confiável para CDC), cada execução sobrescreve a
+  tabela raw correspondente em vez de fazer append — rodar duas vezes
+  seguidas não duplica dado. Detalhes em `ingestion/loaders.py`.
+- Validado contra o arquivo real de 5M linhas: pico de memória de ~240MB
+  processando lotes de 100k linhas (bem abaixo do que seria carregar a
+  tabela inteira em pandas).
 
 ## Uso de IA no desenvolvimento
 
