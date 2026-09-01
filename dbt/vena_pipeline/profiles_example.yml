@@ -1,0 +1,15 @@
+# Copie para ~/.dbt/profiles.yml (fora do repo) e preencha via env vars.
+# NUNCA commitar um profiles.yml com credenciais reais.
+
+vena_pipeline:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: service-account
+      project: "{{ env_var('GCP_PROJECT_ID') }}"
+      dataset: "{{ env_var('BQ_DATASET') }}"
+      location: "{{ env_var('GCP_REGION') }}"
+      keyfile: "{{ env_var('GOOGLE_APPLICATION_CREDENTIALS') }}"
+      threads: 4
+      job_execution_timeout_seconds: 300

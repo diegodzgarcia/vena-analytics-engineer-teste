@@ -1,0 +1,33 @@
+name: 'vena_pipeline'
+version: '1.0.0'
+config-version: 2
+
+profile: 'vena_pipeline'
+
+model-paths: ["models"]
+snapshot-paths: ["snapshots"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# O README do teste restringe o uso a um único dataset
+# (`vena-teste.teste_tecnico_ae_diego`). Por isso NÃO usamos `+schema` custom
+# aqui (no adapter BigQuery isso criaria datasets adicionais por sufixo) —
+# a separação de camadas é feita por prefixo no nome dos modelos
+# (stg_*, mart_*) dentro do mesmo dataset.
+#
+# TODO (etapa de camada staging + mart):
+# - models/staging/: stg_clientes, stg_produtos, stg_itens_pedido
+#     (dedup, tipagem, materialized: view ou incremental conforme volume)
+# - models/marts/: mart_saude_comercial (grão pedido/item, materialized: table
+#     ou incremental com merge, particionado por data_item)
+# - snapshots/: snapshot de clientes para SCD Type 2
+models:
+  vena_pipeline:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table

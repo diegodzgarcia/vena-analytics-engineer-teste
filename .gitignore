@@ -1,0 +1,37 @@
+# Credenciais — NUNCA versionar
+sa-*.json
+*.json.key
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Dagster
+.dagster_home/
+dagster_home/
+storage/
+
+# dbt
+dbt/vena_pipeline/target/
+dbt/vena_pipeline/dbt_packages/
+dbt/vena_pipeline/logs/
+profiles.yml
+
+# Dados locais / scratch (landing de parquet, downloads do sqlite, etc.)
+data/*
+!data/.gitkeep
+
+# Banco transacional original (contém dados "sujos" de teste, não faz sentido versionar)
+banco_transacional.sqlite
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
