@@ -1,0 +1,14 @@
+version: 2
+
+sources:
+  - name: raw
+    description: >
+      Camada raw — dado exatamente como extraído das fontes (ver
+      src/vena_pipeline/ingestion/). Sem limpeza/tipagem: isso acontece
+      aqui na staging.
+    database: "{{ target.database }}"
+    schema: "{{ target.schema }}"
+    tables:
+      - name: raw_clientes
+      - name: raw_produtos
+      - name: raw_itens_pedido
