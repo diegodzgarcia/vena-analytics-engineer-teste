@@ -1,0 +1,51 @@
+version: 2
+
+models:
+  - name: stg_clientes
+    description: Clientes deduplicados e tipados (1 linha por cliente_id).
+    columns:
+      - name: cliente_id
+        description: Chave primária de negócio.
+        data_tests:
+          - not_null
+          - unique
+
+  - name: stg_produtos
+    description: Produtos deduplicados, com preco_tabela e ativo normalizados.
+    columns:
+      - name: produto_id
+        description: Chave primária de negócio.
+        data_tests:
+          - not_null
+          - unique
+
+  - name: stg_itens_pedido
+    description: Itens de pedido deduplicados e tipados (grão = item_id).
+    columns:
+      - name: item_id
+        description: Chave primária de negócio.
+        data_tests:
+          - not_null
+          - unique
+      - name: cliente_id
+        description: >
+          FK para stg_clientes. Teste roda como WARN, não ERROR: o
+          desafio injeta propositalmente ~75k linhas com cliente_id órfão
+          (chave quebrada) — a raw layer preserva isso fielmente, e o
+          objetivo aqui é MEDIR a taxa de órfãos (observabilidade), não
+          quebrar o build por causa de um problema de dado conhecido e
+          documentado.
+        data_tests:
+          - relationships:
+              to: ref('stg_clientes')
+              field: cliente_id
+              config:
+                severity: warn
+      - name: produto_id
+        description: FK para stg_produtos — mesma lógica do cliente_id acima.
+        data_tests:
+          - relationships:
+              to: ref('stg_produtos')
+              field: produto_id
+              config:
+                severity: warn

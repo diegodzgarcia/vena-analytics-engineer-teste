@@ -1,0 +1,17 @@
+version: 2
+
+models:
+  - name: mart_saude_comercial
+    description: >
+      Tabela analítica final (grão pedido/item), pronta para o dashboard
+      de saúde comercial. Cliente resolvido point-in-time via
+      clientes_snapshot (SCD2); produto com atributos atuais.
+    columns:
+      - name: item_id
+        description: Grão da tabela — 1 linha por item de pedido.
+        data_tests:
+          - not_null
+          - unique
+      - name: data_item
+        data_tests:
+          - not_null
