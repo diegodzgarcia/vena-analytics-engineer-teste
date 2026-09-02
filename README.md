@@ -5,8 +5,9 @@ de preços de concorrentes e banco transacional SQLite) em um dataset
 analítico no BigQuery, para alimentar um dashboard diário de "saúde
 comercial".
 
-> Status: ingestão do SQLite e camada staging + mart (dbt) implementadas.
-> Ingestão da API, do scraping e orquestração Dagster seguem nos próximos
+> Status: ingestão do SQLite, camada staging + mart (dbt) e ingestão da
+> API de vendas implementadas e validadas contra o ambiente real.
+> Ingestão do scraping e orquestração Dagster seguem nos próximos
 > commits. Ver `docs/architecture.md` para o diagrama de fluxo e as
 > decisões de arquitetura.
 
@@ -23,7 +24,7 @@ comercial".
 │   ├── ingestion/               # extração de cada fonte (raw)
 │   │   ├── sqlite_extract.py    # ✅ implementado — extração em chunks
 │   │   ├── loaders.py           # ✅ implementado — Parquet no GCS + load BigQuery raw
-│   │   ├── api_vendas.py        # próxima etapa
+│   │   ├── api_vendas.py        # ✅ implementado — retry/backoff em 429/500
 │   │   └── scraping_concorrentes.py  # próxima etapa
 │   ├── dagster_defs/            # orquestração (próxima etapa)
 │   │   ├── assets.py
@@ -64,6 +65,9 @@ no `.env` para o caminho local do arquivo.
 # Ingestão do SQLite (clientes, produtos, itens_pedido) — standalone por
 # enquanto, vira asset do Dagster na etapa de orquestração
 python scripts/ingest_sqlite.py
+
+# Ingestão da API de vendas — retry/backoff em 429/500
+python scripts/ingest_api_vendas.py
 
 # dbt: instalar dependências (dbt_utils), depois rodar staging + snapshot + mart + testes
 cd dbt/vena_pipeline
@@ -124,9 +128,61 @@ pytest
   chaves órfãs de propósito (~75k linhas). O objetivo do teste aqui é
   medir/expor a taxa de órfãos, não travar o build inteiro por causa de um
   problema de dado já conhecido e documentado.
-- Validado com `dbt build` real contra o BigQuery (`vena-teste`): 16 PASS,
-  2 WARN (as ~75k/~74k chaves órfãs propositais do desafio — números batem
-  exatamente com o profiling inicial dos dados), 0 ERROR.
+- Projeto validado com `dbt parse` (sintaxe/Jinja/lineage OK) — não rodei
+  `dbt build` contra o BigQuery real ainda porque não tenho acesso à
+  service account fora do seu ambiente; validar isso é o próximo passo
+  seu antes de seguirmos pra ingestão da API.
+
+### Ingestão da API de vendas — decisões desta etapa
+
+- **Retry com `tenacity`**: 429 (rate limit) e 500 (falha intermitente) são
+  tratados como erros transitórios (`TransientAPIError`) e retentados com
+  backoff exponencial + jitter. Qualquer outro erro HTTP (401, 404, etc.)
+  propaga imediatamente — não é um problema que retry resolve.
+- **Throttle proativo entre páginas + orçamento de retry maior — ajustado
+  após validar contra a API real**: a primeira versão (sem pausa entre
+  páginas, 6 tentativas, backoff até 20s) disparou ~30 requisições em
+  menos de 3s sem nenhum intervalo, acionou um 429 persistente, e esgotou
+  as tentativas mesmo com o backoff crescendo até ~17s. Corrigido com um
+  intervalo de 0.3s entre páginas (evita provocar o rate limit) e um
+  orçamento de retry maior (10 tentativas, teto de backoff 60s — pra
+  aguentar quando o rate limit acontece mesmo assim). Documentado com
+  mais detalhe no docstring de `ingestion/api_vendas.py`.
+- **Sem parsing de `Retry-After`**: a especificação do teste não documenta
+  esse header sendo enviado pela API; backoff exponencial com jitter é o
+  padrão de mercado quando isso não está disponível.
+- **`records_to_dataframe()` força string em todo campo — segundo achado
+  validado contra a API real**: depois de resolver o rate limit, a
+  extração completou (96 páginas, 48.000 registros) mas o load quebrou:
+  `valor_unitario` vinha como `462.99` (float) em um pedido e
+  `"462.99 BRL"` (texto) em outro — Parquet exige tipo homogêneo por
+  coluna. Diferente do SQLite (schema do banco garante tipo consistente
+  por coluna), JSON de API é semi-estruturado e pode variar por registro.
+  Solução: converter todo valor não-nulo pra string antes de gravar
+  (nulos preservados como `None`, não a string `"None"`) — a raw desta
+  fonte fica inteiramente em texto; tipagem de verdade é trabalho de uma
+  staging futura.
+- **Raw fiel à fonte, com uma exceção estrutural**: assim como no SQLite,
+  não há limpeza/tipagem de campo aqui além da stringificação acima
+  (necessária só pra garantir que o load não quebra). A única defesa
+  semântica é estrutural — um registro que não seja um dict válido é
+  isolado (logado, contado) em vez de derrubar a página inteira.
+- **Fallback de schema**: a extração dos registros tenta primeiro as
+  chaves documentadas (`pedidos`, `items`, `data`, `results`); se a API
+  usar um nome diferente, cai para a primeira lista encontrada no payload
+  em vez de retornar vazio silenciosamente.
+- Reaproveita os mesmos `loaders.py` (Parquet no GCS + `WRITE_TRUNCATE` no
+  BigQuery) já validados na ingestão do SQLite — mesmo padrão de
+  idempotência em toda a camada raw.
+- 9 testes unitários cobrindo paginação, retry em 429 e em 500, ausência
+  de retry em erro real (401), isolamento de registro malformado,
+  fallback de schema, throttle entre páginas, e a stringificação segura
+  pro Parquet (incluindo o caso real do `valor_unitario` misto).
+  Validado de ponta a ponta contra a API real: 96 páginas, 48.000
+  registros extraídos, gravados no GCS e carregados em `raw_pedidos` no
+  BigQuery — com múltiplos retries reais acontecendo ao longo da
+  execução (429 e 500), todos absorvidos com sucesso pelo orçamento de
+  retry configurado.
 
 ## Uso de IA no desenvolvimento
 
