@@ -131,10 +131,35 @@ pytest
   chaves órfãs de propósito (~75k linhas). O objetivo do teste aqui é
   medir/expor a taxa de órfãos, não travar o build inteiro por causa de um
   problema de dado já conhecido e documentado.
-- Projeto validado com `dbt parse` (sintaxe/Jinja/lineage OK) — não rodei
-  `dbt build` contra o BigQuery real ainda porque não tenho acesso à
-  service account fora do seu ambiente; validar isso é o próximo passo
-  seu antes de seguirmos pra ingestão da API.
+- Validado com `dbt build` real contra o BigQuery (`vena-teste`): 16 PASS,
+  2 WARN (as ~75k/~74k chaves órfãs propositais do desafio — números batem
+  exatamente com o profiling inicial dos dados), 0 ERROR.
+
+### Bug real encontrado após a etapa 4 (API de vendas) — join point-in-time do mart
+
+Ao inspecionar `mart_saude_comercial` via `bq query` depois de já termos
+ingerido a API de vendas, `cliente_nome`/`cidade`/`estado`/`segmento`
+apareciam `NULL` em **100% das linhas** — não pegamos isso antes porque os
+testes de qualidade do mart cobriam só `item_id`/`data_item`, não os
+campos de cliente.
+
+**Causa:** o join point-in-time original exigia estritamente
+`data_item >= dbt_valid_from`. Como `itens_pedido` é histórico retroativo
+(vendas de 2024) e `dbt_valid_from` da primeira versão de cada cliente é a
+hora em que o `dbt snapshot` rodou pela primeira vez (02/09/2026), **toda**
+venda é anterior ao início do rastreamento — a condição falhava sempre.
+
+**Correção:** a janela de vigência continua sendo a preferência, mas se
+nenhuma versão cobre a data da venda (caso do dado retroativo), o join cai
+pra versão mais antiga conhecida como melhor aproximação disponível, em
+vez de `NULL` (via `ROW_NUMBER()` com prioridade, não mais um join direto
+com `AND` na condição de data). Adicionado
+`tests/assert_client_join_coverage.sql` (teste singular) especificamente
+pra essa regressão — falha se algum cliente que existe em `stg_clientes`
+aparecer com `cliente_nome` nulo no mart (órfãos propositais continuam
+nulos e não contam como falha, são excluídos via `INNER JOIN` no teste).
+
+Ainda precisa ser revalidado com `dbt build` no seu ambiente.
 
 ### Ingestão da API de vendas — decisões desta etapa
 
