@@ -5,11 +5,11 @@ de preços de concorrentes e banco transacional SQLite) em um dataset
 analítico no BigQuery, para alimentar um dashboard diário de "saúde
 comercial".
 
-> Status: ingestão do SQLite, camada staging + mart (dbt) e ingestão da
-> API de vendas implementadas e validadas contra o ambiente real.
-> Ingestão do scraping e orquestração Dagster seguem nos próximos
-> commits. Ver `docs/architecture.md` para o diagrama de fluxo e as
-> decisões de arquitetura.
+> Status: ingestão do SQLite, camada staging + mart (dbt), ingestão da
+> API de vendas e ingestão do scraping implementadas e validadas contra
+> o ambiente real. Orquestração Dagster é a próxima etapa. Ver
+> `docs/architecture.md` para o diagrama de fluxo e as decisões de
+> arquitetura.
 
 ## Estrutura do repositório
 
@@ -25,7 +25,7 @@ comercial".
 │   │   ├── sqlite_extract.py    # ✅ implementado — extração em chunks
 │   │   ├── loaders.py           # ✅ implementado — Parquet no GCS + load BigQuery raw
 │   │   ├── api_vendas.py        # ✅ implementado — retry/backoff em 429/500
-│   │   └── scraping_concorrentes.py  # próxima etapa
+│   │   └── scraping_concorrentes.py  # ✅ implementado — parsing resiliente a schema drift
 │   ├── dagster_defs/            # orquestração (próxima etapa)
 │   │   ├── assets.py
 │   │   ├── resources.py
@@ -68,6 +68,9 @@ python scripts/ingest_sqlite.py
 
 # Ingestão da API de vendas — retry/backoff em 429/500
 python scripts/ingest_api_vendas.py
+
+# Ingestão do scraping — parsing resiliente a schema drift
+python scripts/ingest_scraping_concorrentes.py
 
 # dbt: instalar dependências (dbt_utils), depois rodar staging + snapshot + mart + testes
 cd dbt/vena_pipeline
@@ -183,6 +186,40 @@ pytest
   BigQuery — com múltiplos retries reais acontecendo ao longo da
   execução (429 e 500), todos absorvidos com sucesso pelo orçamento de
   retry configurado.
+
+### Ingestão do scraping — decisões desta etapa
+
+- **Parsing por padrão de texto, não por seletor CSS** — a decisão
+  central desta etapa. Uma estratégia baseada em `soup.find(".preco")` ou
+  `.select("table.precos tr")` quebra exatamente quando a estrutura muda
+  (o problema que o desafio simula de propósito). Em vez disso, o parser
+  ancora no **preço** (único campo com formato reconhecível de forma
+  confiável em qualquer estrutura de tags) e extrai categoria/status pelo
+  texto ao redor dele — funciona igual numa `<table>`, numa lista de
+  `<div>`, ou em qualquer outra marcação.
+- **Duas estratégias em cascata**: tenta `<table>` primeiro (caminho mais
+  direto quando existe); cai pro parsing por padrão de texto se não
+  houver tabela. Nunca lança exceção — retorna lista vazia e loga o
+  motivo na pior hipótese (página fora do ar, estrutura irreconhecível).
+- **Bug real encontrado e corrigido durante o desenvolvimento**: extrair
+  categoria e status de forma independente causava sobreposição (o texto
+  "no meio" entre dois preços contém o status do item anterior *e* a
+  categoria do próximo, ambos começando com maiúscula — uma extração
+  ingênua pega os dois juntos, ex. `"Em estoque Acessórios"` em vez de só
+  `"Em estoque"`). Corrigido processando o texto sequencialmente: o que
+  sobra depois de extrair o status do item N vira a categoria do item
+  N+1. Há um teste de regressão específico pra isso.
+- **Validado contra o HTML real da página do desafio** (inspecionado
+  diretamente, fora deste ambiente de desenvolvimento): 12/12 itens
+  extraídos corretamente, incluindo o cabeçalho fixo da página sendo
+  descartado (ele também é Título-Case, vazaria pro primeiro item sem
+  essa remoção explícita).
+- 7 testes unitários cobrindo as duas estratégias, o bug de sobreposição
+  acima (regressão), falha de rede, HTTP de erro, e estrutura totalmente
+  desconhecida. Validado de ponta a ponta contra a página real: 12
+  registros extraídos via `estrategia: text_pattern` — ou seja, a
+  execução real caiu numa variante sem `<table>`, confirmando que o
+  fallback por padrão de texto funciona fora dos testes mockados também.
 
 ## Uso de IA no desenvolvimento
 
