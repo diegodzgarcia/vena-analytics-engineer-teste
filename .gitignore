@@ -17,6 +17,10 @@ venv/
 .dagster_home/
 dagster_home/
 storage/
+# diretório temporário real criado por `dagster dev` quando DAGSTER_HOME
+# não está definido (tempfile.mkdtemp() gera nomes tipo tmpXXXXXXXX/ na
+# raiz do projeto) -- guarda histórico de runs (SQLite), não é código
+tmp*/
 
 # dbt
 dbt/vena_pipeline/target/
