@@ -5,9 +5,11 @@ de preços de concorrentes e banco transacional SQLite) em um dataset
 analítico no BigQuery, para alimentar um dashboard diário de "saúde
 comercial".
 
-> Status: ingestão do SQLite, camada staging + mart (dbt), ingestão da
-> API de vendas e ingestão do scraping implementadas e validadas contra
-> o ambiente real. Orquestração Dagster é a próxima etapa. Ver
+> Status: pipeline completo implementado e validado de ponta a ponta —
+> ingestão (SQLite, API, scraping), staging + mart (dbt) e orquestração
+> em Dagster, com todos os assets materializados com sucesso contra o
+> ambiente real. Idempotência, observabilidade fina e o README final
+> (com a seção de uso de IA) são a última etapa. Ver
 > `docs/architecture.md` para o diagrama de fluxo e as decisões de
 > arquitetura.
 
@@ -26,7 +28,7 @@ comercial".
 │   │   ├── loaders.py           # ✅ implementado — Parquet no GCS + load BigQuery raw
 │   │   ├── api_vendas.py        # ✅ implementado — retry/backoff em 429/500
 │   │   └── scraping_concorrentes.py  # ✅ implementado — parsing resiliente a schema drift
-│   ├── dagster_defs/            # orquestração (próxima etapa)
+│   ├── dagster_defs/            # ✅ implementado — 5 assets + dbt_build + check + schedule
 │   │   ├── assets.py
 │   │   ├── resources.py
 │   │   ├── asset_checks.py
@@ -77,7 +79,8 @@ cd dbt/vena_pipeline
 dbt deps
 dbt build
 
-# Dagster UI (ainda sem assets registrados)
+# Dagster UI — 5 assets de ingestão + dbt_build, com dependências reais,
+# schedule diário, e 1 asset check
 dagster dev -f src/vena_pipeline/dagster_defs/definitions.py
 
 # Testes unitários (Python)
@@ -245,6 +248,71 @@ Ainda precisa ser revalidado com `dbt build` no seu ambiente.
   registros extraídos via `estrategia: text_pattern` — ou seja, a
   execução real caiu numa variante sem `<table>`, confirmando que o
   fallback por padrão de texto funciona fora dos testes mockados também.
+
+### Orquestração em Dagster — decisões desta etapa
+
+- **Grafo**: 5 assets de ingestão (`raw_clientes`, `raw_produtos`,
+  `raw_itens_pedido`, `raw_pedidos`, `raw_precos_concorrentes`) →
+  `dbt_build` (staging + snapshot + mart + testes). Dependência real, não
+  só ordem: `dbt_build` declara `deps=[...]` pros 5 assets — o dbt só
+  materializa depois que a raw inteira existe no BigQuery.
+- **`dbt build` via `subprocess`, não `@dbt_assets`/`DbtCliResource`**: a
+  integração "oficial" do pacote `dagster-dbt` cria um asset por MODEL do
+  dbt (dependências finas automáticas via manifest.json) — mais elegante,
+  mas depende de detalhes de API que variam entre versões e exige gerar o
+  manifest com credencial GCP real pra validar, algo que não consigo
+  fazer neste ambiente de desenvolvimento. `subprocess` é mais grosseiro
+  (1 asset = todo o `dbt build`), mas 100% previsível e testável sem
+  depender de nenhuma versão específica de biblioteca. `dagster-gcp` e
+  `dagster-dbt` foram removidos do `requirements.txt` por não serem
+  usados — decisão documentada em `dagster_defs/resources.py`.
+- **Asset com falha proposital**: `raw_precos_concorrentes` trata "zero
+  registros extraídos" como falha real (levanta `Failure`), mesmo a
+  função de extração em si nunca lançando exceção sozinha (ela é
+  resiliente por design, ver etapa do scraping). A lógica: um schema
+  totalmente irreconhecível ou a página fora do ar é informação que vale
+  a pena parar e escalar, não silenciar. Tem `retry_policy` configurado
+  (2 tentativas, 15s de intervalo) — cobre o caso comum (schema drift
+  pontual que se resolve na próxima tentativa).
+- **`retry_policy` também em `raw_pedidos`** (2 tentativas, 30s): camada
+  extra de resiliência acima do retry/backoff que `extract_pedidos()` já
+  faz internamente via `tenacity` — se mesmo assim a extração falhar de
+  vez, o Dagster tenta o asset inteiro de novo.
+- **Asset check reaproveitando `run_results.json`**: em vez de consultar
+  o BigQuery de novo pra saber quantos testes do dbt passaram/avisaram/
+  falharam, o check lê o artefato que o próprio `dbt build` já escreve —
+  menos código, menos pontos de falha, e a métrica (taxa de linhas em
+  WARN nos testes de integridade referencial) fica visível na UI do
+  Dagster, não só no log do terminal.
+- **Schedule diário (06:00, `America/Sao_Paulo`)**: alimenta o "dashboard
+  diário de saúde comercial" citado no enunciado — roda de madrugada,
+  antes do horário comercial.
+- **Windows: `PYTHONLEGACYWINDOWSSTDIO=1` necessário antes do `dagster
+  dev`** — sem essa variável, a materialização de qualquer asset trava
+  indefinidamente (subprocess nunca retorna). É um problema conhecido de
+  captura de I/O de subprocessos no Windows, não específico deste
+  projeto. Documentado aqui porque custou tempo real de debug.
+- **Limitação conhecida de observabilidade**: os logs estruturados
+  (`structlog`) da camada de ingestão não aparecem no stderr capturado
+  pela UI do Dagster — só os eventos internos do próprio Dagster
+  (`STEP_START`, `STEP_OUTPUT`, etc.) aparecem lá. Os logs do
+  `structlog` continuam funcionando normalmente fora do Dagster (scripts
+  standalone). Correção natural pra uma próxima iteração: usar
+  `context.log` do Dagster dentro dos assets em vez de (ou além de)
+  `get_logger()`, ou configurar um handler que redireciona `structlog`
+  pro logger do Dagster.
+- **Validado de ponta a ponta contra o BigQuery/GCS real, via
+  materialização de cada asset individualmente na UI do Dagster**:
+  - `raw_clientes`: 6.180 linhas
+  - `raw_produtos`: 800 linhas
+  - `raw_itens_pedido`: 5.000.000 linhas em 50 chunks (1m41s)
+  - `raw_pedidos`: 48.000 linhas (4m7s — tempo bem acima do normal,
+    indício de retry real por rate limit absorvido com sucesso)
+  - `raw_precos_concorrentes`: 12 linhas
+  - `dbt_build`: 17 PASS, 2 WARN, 0 ERROR, 19 nodes totais
+  - Asset check `dbt_test_warn_rate_within_tolerance`: **PASSOU**,
+    149.840 linhas em WARN (74.639 + 75.201, as duas chaves órfãs
+    somadas) — bem dentro do limite de 200.000 configurado.
 
 ## Uso de IA no desenvolvimento
 
