@@ -5,13 +5,14 @@ de preços de concorrentes e banco transacional SQLite) em um dataset
 analítico no BigQuery, para alimentar um dashboard diário de "saúde
 comercial".
 
-> Status: pipeline completo implementado e validado de ponta a ponta —
-> ingestão (SQLite, API, scraping), staging + mart (dbt) e orquestração
-> em Dagster, com todos os assets materializados com sucesso contra o
-> ambiente real. Idempotência, observabilidade fina e o README final
-> (com a seção de uso de IA) são a última etapa. Ver
+> **Status: completo.** Ingestão (SQLite, API de vendas, scraping),
+> staging + mart (dbt), orquestração em Dagster e idempotência — todas
+> as etapas implementadas e validadas de ponta a ponta contra o
+> ambiente real (`vena-teste`), com o pipeline completo rodado duas
+> vezes seguidas para comprovar que nada duplica. Ver
 > `docs/architecture.md` para o diagrama de fluxo e as decisões de
-> arquitetura.
+> arquitetura, e a seção "Uso de IA no desenvolvimento" abaixo para a
+> metodologia completa.
 
 ## Estrutura do repositório
 
@@ -314,11 +315,115 @@ Ainda precisa ser revalidado com `dbt build` no seu ambiente.
     149.840 linhas em WARN (74.639 + 75.201, as duas chaves órfãs
     somadas) — bem dentro do limite de 200.000 configurado.
 
+### Idempotência — validação desta etapa
+
+Rodei o pipeline completo duas vezes seguidas (via "Materialize all" no
+Dagster) e comparei o estado do BigQuery antes/depois:
+
+| Tabela | Antes | Depois |
+| --- | --- | --- |
+| raw_clientes | 6.180 | 6.180 |
+| raw_produtos | 800 | 800 |
+| raw_itens_pedido | 5.000.000 | 5.000.000 |
+| raw_pedidos | 48.000 | 48.000 |
+| raw_precos_concorrentes | 12 | 13 |
+| **clientes_snapshot** | **6.168** | **6.168** |
+| mart_saude_comercial | 5.000.000 | 5.000.000 |
+
+Todas as tabelas raw ficaram idênticas — esperado, `WRITE_TRUNCATE`
+garante isso por construção (ver `ingestion/loaders.py`). A única
+variação (`raw_precos_concorrentes`: 12 → 13) não é falha de
+idempotência: a API de scraping gera dados aleatórios a cada chamada, é
+a fonte mudando de conteúdo entre as duas execuções, não o pipeline
+duplicando nada.
+
+O número mais importante da tabela é o `clientes_snapshot` continuar
+**exatamente em 6.168** nas duas rodadas. Se a estratégia `check` do SCD2
+estivesse comparando errado (achando "mudança" onde não tem), esse
+número teria praticamente dobrado (uma segunda versão por cliente) — ele
+não mudou, confirmando que rodar o pipeline duas vezes seguidas não
+duplica nada, nem na raw nem no histórico versionado.
+
 ## Uso de IA no desenvolvimento
 
-> Seção obrigatória pelo teste — preenchida ao final, com o detalhamento
-> real de ferramentas, metodologia e o que foi revisado/corrigido
-> manualmente.
+**Ferramenta usada:** Claude (Anthropic), via chat, do início ao fim do
+desafio, desde a leitura inicial dos arquivos do teste até a última
+etapa. Não usei Copilot, Cursor ou ferramentas de IA embutidas no editor
+neste projeto sendo toda a interação feita de maneira conversacional.
+
+**Metodologia/fluxo de trabalho:**
+
+Não foi spec-first (não escrevi um plano detalhado e pedi pra IA
+implementar tudo de uma vez) nem TDD assistido no sentido estrito. O
+fluxo real foi interativo, etapa por etapa, com validação contra o
+ambiente real antes de avançar:
+
+1. Definimos juntos a ordem de execução das 7 etapas no início (do que
+   eu já dominava (SQL, BigQuery, dbt Cloud) para oque era novo pra mim
+   (Dagster, dbt Core via CLI)), e seguimos essa ordem do início ao fim.
+2. Para cada etapa: a IA implementava o código com testes unitários
+   mockados (sem acesso ao meu ambiente GCP real), eu copiava os
+   arquivos pro meu projeto local, rodava os testes (`pytest`) e depois
+   validava de verdade contra o BigQuery/GCS/APIs reais na minha
+   máquina para então avançar pra próxima etapa.
+3. Cada bug encontrado na validação real virava um ciclo de
+   diagnóstico → correção → nova validação, documentado no lugar da
+   etapa correspondente neste README.
+
+**Como o código gerado foi revisado:** rodando de verdade contra o
+ambiente real (não só lendo o código), foi exatamente esse processo que
+expôs a maioria dos bugs abaixo, que não teriam aparecido só olhando o
+código ou rodando testes mockados.
+
+**Casos em que a IA "alucinou" ou o código gerado estava errado, e como
+foi percebido/corrigido:**
+
+- **`from __future__ import annotations` quebrando o Dagster**: o
+  parâmetro `context` de cada asset passou a ser validado como string em
+  vez do tipo de verdade (efeito colateral do PEP 563 que a IA não tinha
+  previsto). Percebido rodando `dagster asset list` localmente antes de
+  eu sequer testar, corrigido antes de eu perder tempo com isso.
+- **Join point-in-time do mart retornando `NULL` em 100% das linhas**:
+  o código compilava e os testes automatizados passavam, mas a lógica
+  de negócio estava errada e o teste de qualidade do dbt cobria só
+  unicidade/não-nulo das chaves, não os campos de cliente enriquecidos.
+  Eu que encontrei isso, inspecionando os dados de verdade via
+  `bq query` por curiosidade própria, não porque algum teste apontou.
+- **Rate limit da API mais agressivo do que a primeira versão do
+  retry aguentava**: só apareceu rodando contra a API real (48 mil
+  registros, ~30 páginas até bater no limite), testes mockados não
+  captam esse tipo de comportamento de ambiente real.
+- **Tipo misto no Parquet** (`valor_unitario` como número em um pedido,
+  texto com unidade em outro): mesma categoria só rodando contra dado
+  real de verdade.
+- **"Src layout" do projeto não resolvido pelo Dagster**: a IA validou
+  contra `pytest` (que usa `pytest.ini`) mas não tinha como testar
+  `dagster dev` de verdade no ambiente dela — só apareceu quando rodei
+  na minha máquina.
+- **Travamento no Windows sem `PYTHONLEGACYWINDOWSSTDIO=1`**: um
+  problema de ambiente puramente meu (Windows + captura de subprocesso),
+  que a IA não tinha como prever nem reproduzir, mas ajudou a
+  diagnosticar por eliminação quando relatei o sintoma (travamento sem
+  erro, sem consumo de CPU).
+- **Diretórios temporários do Dagster commitados por engano**: erro
+  meu, no fluxo de Git passou despercebido no `git add .` antes de eu
+  conferir o `git status` com atenção.
+
+**O que eu não deleguei para a IA:**
+
+- **Toda execução real de código** contra BigQuery, GCS e as APIs do
+  desafio a IA nunca teve (nem pode ter) acesso à minha credencial
+  (`sa-candidato-ae-diego.json`). Rodei cada script, cada `dbt build`,
+  cada materialização no Dagster, e colei os resultados de volta.
+- **Toda a operação de Git** (branches, commits, PRs, merges) feitas
+  por mim, comando por comando, no meu terminal.
+- **A decisão de quando algo estava "bom o suficiente" pra avançar**
+  por exemplo, insisti em rodar `dbt build` contra o ambiente real antes
+  de seguir pra próxima etapa em vez de aceitar só a validação sintática
+  (`dbt parse`) que era tudo que a IA conseguia fazer sozinha.
+- **A inspeção exploratória dos dados** (queries `bq` por curiosidade,
+  não só pra validar algo específico), foi assim que encontrei o bug do
+  join do mart, que nenhum teste automatizado tinha pego.
 
 ## Decisões de arquitetura e trade-offs
 
