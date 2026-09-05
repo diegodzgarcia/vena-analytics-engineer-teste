@@ -1,4 +1,4 @@
-# Pipeline de Dados — Teste Técnico Analytics Engineer Sênior (Vena BPO)
+# Pipeline de Dados — Teste Técnico Analytics Engineer (Vena)
 
 Pipeline ELT que consolida três fontes heterogêneas (API de vendas, scraping
 de preços de concorrentes e banco transacional SQLite) em um dataset
