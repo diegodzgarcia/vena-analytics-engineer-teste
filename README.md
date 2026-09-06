@@ -10,9 +10,55 @@ comercial".
 > as etapas implementadas e validadas de ponta a ponta contra o
 > ambiente real (`vena-teste`), com o pipeline completo rodado duas
 > vezes seguidas para comprovar que nada duplica. Ver
-> `docs/architecture.md` para o diagrama de fluxo e as decisões de
-> arquitetura, e a seção "Uso de IA no desenvolvimento" abaixo para a
-> metodologia completa.
+> `docs/architecture.md` para as decisões de arquitetura em detalhe, e
+> a seção "Uso de IA no desenvolvimento" abaixo para a metodologia
+> completa.
+
+## Diagrama do fluxo de dados
+
+```mermaid
+flowchart LR
+    subgraph Fontes
+        A1[API de vendas<br/>Cloud Run]
+        A2[Scraping concorrentes<br/>Cloud Run]
+        A3[(SQLite<br/>banco transacional)]
+    end
+
+    subgraph Dagster [Assets do Dagster]
+        B1[raw_pedidos<br/>retry/backoff + throttle]
+        B2[raw_precos_concorrentes<br/>parsing defensivo + retry policy]
+        B3[raw_clientes / raw_produtos]
+        B4[raw_itens_pedido<br/>chunks -> Parquet]
+        B5[dbt_build<br/>subprocess]
+    end
+
+    subgraph GCS [GCS - landing]
+        G[(gs://vena-teste-candidato-ae-diego)]
+    end
+
+    subgraph BQ [BigQuery - vena-teste.teste_tecnico_ae_diego]
+        R[(raw_*)]
+        S[(stg_* - dbt)]
+        SN[(clientes_snapshot - SCD2)]
+        M[(mart_saude_comercial - dbt)]
+    end
+
+    D[Dashboard saúde comercial]
+
+    A1 --> B1 --> G --> R
+    A2 --> B2 --> G --> R
+    A3 --> B3 --> G --> R
+    A3 --> B4 --> G --> R
+    R --> B5
+    B5 --> S --> M --> D
+    S --> SN --> M
+```
+
+Os 5 assets de ingestão alimentam a raw no BigQuery; `dbt_build` depende
+de todos os 5 (dependência real, não só ordem) e roda staging →
+snapshot → mart + testes num único `dbt build`. Detalhes de cada
+decisão de arquitetura estão nas seções por etapa abaixo, e um
+detalhamento adicional em `docs/architecture.md`.
 
 ## Estrutura do repositório
 
@@ -21,7 +67,9 @@ comercial".
 ├── docs/
 │   └── architecture.md        # diagrama do fluxo + decisões de arquitetura
 ├── scripts/
-│   └── ingest_sqlite.py        # orquestra a ingestão do SQLite (standalone por enquanto)
+│   ├── ingest_sqlite.py        # mesma lógica reaproveitada pelos assets raw_* do Dagster
+│   ├── ingest_api_vendas.py    # idem — reaproveitado pelo asset raw_pedidos
+│   └── ingest_scraping_concorrentes.py  # idem — reaproveitado pelo asset raw_precos_concorrentes
 ├── src/vena_pipeline/
 │   ├── config.py               # configuração central (lê .env)
 │   ├── ingestion/               # extração de cada fonte (raw)
@@ -64,27 +112,35 @@ no `.env` para o caminho local do arquivo.
 
 ## Rodando o pipeline
 
+**Via Dagster (recomendado — orquestra tudo, com dependências reais e retry):**
+
 ```bash
-# Ingestão do SQLite (clientes, produtos, itens_pedido) — standalone por
-# enquanto, vira asset do Dagster na etapa de orquestração
+dagster dev -f src/vena_pipeline/dagster_defs/definitions.py
+```
+
+Abre a UI em `http://localhost:3000`. Clique em "Materialize all" pra
+rodar o pipeline completo (5 assets de ingestão + `dbt_build`), ou
+selecione um asset específico pra rodar isolado. No Windows, defina
+`set PYTHONLEGACYWINDOWSSTDIO=1` antes de rodar — ver nota na seção de
+Dagster abaixo.
+
+**Scripts standalone** (mesma lógica que os assets do Dagster chamam por
+baixo — úteis pra debugar uma fonte isolada sem depender do Dagster
+rodando):
+
+```bash
 python scripts/ingest_sqlite.py
-
-# Ingestão da API de vendas — retry/backoff em 429/500
 python scripts/ingest_api_vendas.py
-
-# Ingestão do scraping — parsing resiliente a schema drift
 python scripts/ingest_scraping_concorrentes.py
 
-# dbt: instalar dependências (dbt_utils), depois rodar staging + snapshot + mart + testes
 cd dbt/vena_pipeline
 dbt deps
 dbt build
+```
 
-# Dagster UI — 5 assets de ingestão + dbt_build, com dependências reais,
-# schedule diário, e 1 asset check
-dagster dev -f src/vena_pipeline/dagster_defs/definitions.py
+**Testes unitários:**
 
-# Testes unitários (Python)
+```bash
 pytest
 ```
 
@@ -162,6 +218,15 @@ com `AND` na condição de data). Adicionado
 pra essa regressão — falha se algum cliente que existe em `stg_clientes`
 aparecer com `cliente_nome` nulo no mart (órfãos propositais continuam
 nulos e não contam como falha, são excluídos via `INNER JOIN` no teste).
+
+**Revalidado**: depois da correção, `dbt build` voltou a rodar limpo
+(17 PASS, 2 WARN — só as chaves órfãs propositais, 0 ERROR), e a
+contagem de `cliente_nome IS NULL` no mart bateu exatamente com o
+número de órfãos reportado pelo teste de integridade referencial
+(75.201) — confirmando que só os órfãos ficam nulos agora, todo o resto
+resolve corretamente. Revalidado de novo na etapa de idempotência (ver
+seção correspondente), rodando o pipeline duas vezes seguidas sem
+regressão.
 
 ### Ingestão da API de vendas — decisões desta etapa
 
