@@ -163,8 +163,6 @@ pra essa regressão — falha se algum cliente que existe em `stg_clientes`
 aparecer com `cliente_nome` nulo no mart (órfãos propositais continuam
 nulos e não contam como falha, são excluídos via `INNER JOIN` no teste).
 
-Ainda precisa ser revalidado com `dbt build` no seu ambiente.
-
 ### Ingestão da API de vendas — decisões desta etapa
 
 - **Retry com `tenacity`**: 429 (rate limit) e 500 (falha intermitente) são
